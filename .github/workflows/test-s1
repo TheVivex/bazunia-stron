@@ -1,0 +1,144 @@
+name: Pipeline S1 Test
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+    #Główne zmienne nie ruszać
+    DEPLOY_DOMAIN: hcmp.pl
+    DEPLOY_HOST: s1
+    #Główne zmienne -> do zmiany 
+    DOMAIN: bazunia-danych
+    APP_PORT: 8000
+    PUBLIC_PORT: 8089
+
+jobs:
+    Build:
+        environment: Produkcja
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: read
+            packages: write
+
+        steps:
+          - uses: actions/checkout@v6
+          - name: Connect to Harbor
+            run: |
+                echo ${{github.token}} | docker login ghcr.io -u ${{github.actor}} --password-stdin
+          - name: Build image
+            run: |
+                docker build -t ghcr.io/thevivex/${{github.event.repository.name}}:latest .
+          - name: Push image
+            run: |
+                docker push ghcr.io/thevivex/${{github.event.repository.name}}:latest
+    Deploy:
+        needs: Build
+        environment: Produkcja
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: read
+        steps:
+          - name: Setup SSH Key
+            run: |
+                mkdir -p ~/.ssh
+                chmod 700 ~/.ssh
+                echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+                chmod 600 ~/.ssh/deploy_key
+          - name: Add host key to known_hosts
+            run: |
+                ssh-keyscan -H -p 47883 ${{env.DEPLOY_HOST}}.${{env.DEPLOY_DOMAIN}} >> ~/.ssh/known_hosts 2>/dev/null
+                chmod 644 ~/.ssh/known_hosts
+          - name: Create Docker Compose & Pull Image
+            run: |
+                ssh -i ~/.ssh/deploy_key apps@${{env.DEPLOY_HOST}}.${{env.DEPLOY_DOMAIN}} -p 47883 << 'EOF'
+                set -e
+                mkdir -p ~/test-apps/${{github.event.repository.name}}
+                cd ~/test-apps/${{github.event.repository.name}}
+
+                cat > docker-compose.yaml << 'KONFIGURACJA'
+                services:
+                  ${{github.event.repository.name}}_test:
+                      image: ghcr.io/thevivex/${{github.event.repository.name}}:latest
+                      ports:
+                      - "127.0.0.1:${{env.PUBLIC_PORT}}:${{env.APP_PORT}}"
+                      networks:
+                      - apps_net
+                      environment:
+                          PG_CONN: ${{vars.DB_CONNECTION}}
+                      restart: unless-stopped
+                networks:
+                  apps_net:
+                    external: true
+
+                KONFIGURACJA
+
+                echo ${{github.token}} | docker login ghcr.io -u ${{github.actor}} --password-stdin
+                docker compose pull
+                docker compose -p ${{github.event.repository.name}}_test up -d --remove-orphans
+
+          - name: Run Nginx Route
+            run: | 
+                ssh -i ~/.ssh/deploy_key apps@${{env.DEPLOY_HOST}}.${{env.DEPLOY_DOMAIN}} -p 47883 << 'EOF'
+                set -e
+                cd /etc/nginx/sites-available
+                cat > ${{github.event.repository.name}}_test.conf << 'KONFIGURACJA'
+                server {
+                    listen  100.122.249.43:80;
+                    server_name ${{env.DOMAIN}}.${{env.DEPLOY_HOST}}.test.${{env.DEPLOY_DOMAIN}};
+
+                    location / {
+                        proxy_pass http://127.0.0.1:${{env.PUBLIC_PORT}};
+                        proxy_http_version 1.1;
+                        proxy_set_header Upgrade $http_upgrade;
+                        proxy_set_header Connection 'upgrade';
+                        proxy_set_header Host $host;
+                        proxy_set_header X-Real-IP $remote_addr;
+                        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                        proxy_set_header X-Forwarded-Proto $scheme;
+                        proxy_cache_bypass $http_upgrade;
+                    }
+                }
+                KONFIGURACJA
+                  
+                rm -f /etc/nginx/sites-enabled/${{github.event.repository.name}}_test.conf
+                ln -s /etc/nginx/sites-available/${{github.event.repository.name}}_test.conf /etc/nginx/sites-enabled/
+                sudo nginx -t
+                sudo systemctl reload nginx
+          - name: Cleanup
+            run: | 
+              rm -f ~/.ssh/deploy_key
+            if: always()
+          - name: Finish
+            run: |
+                  echo "Deployment complete!"
+                  echo "Usługa dostępna przez VPN http://${{env.DOMAIN}}.${{env.DEPLOY_HOST}}.test.${{env.DEPLOY_DOMAIN}}"
+    Verify:
+      needs: [Build, Deploy]
+      runs-on: ubuntu-latest
+      steps:
+          - name: Setup SSH Key
+            run: |
+                mkdir -p ~/.ssh
+                chmod 700 ~/.ssh
+                echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+                chmod 600 ~/.ssh/deploy_key
+          - name: Add host key to known_hosts
+            run: |
+                ssh-keyscan -H -p 47883 ${{env.DEPLOY_HOST}}.${{env.DEPLOY_DOMAIN}} >> ~/.ssh/known_hosts 2>/dev/null
+                chmod 644 ~/.ssh/known_hosts
+          - name: Connect to the service
+            run: |
+              ssh -i ~/.ssh/deploy_key apps@${{env.DEPLOY_HOST}}.${{env.DEPLOY_DOMAIN}} -p 47883 << 'EOF'
+              set -e
+              curl -f http://127.0.0.1:${{env.PUBLIC_PORT}}/health || { echo "Healthcheck failed"; docker-compose logs; exit 1; }
+          - name: Cleanup
+            run: | 
+              rm -f ~/.ssh/deploy_key
+            if: always()
+          
+      
