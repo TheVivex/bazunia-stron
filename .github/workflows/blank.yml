@@ -28,10 +28,10 @@ jobs:
                 echo ${{github.token}} | docker login ghcr.io -u ${{github.actor}} --password-stdin
           - name: Build image
             run: |
-                docker build -t ghcr.io/hcmp-group/${{github.event.repository.name}}:latest .
+                docker build -t ghcr.io/thevivex/${{github.event.repository.name}}:latest .
           - name: Push image
             run: |
-                docker push ghcr.io/hcmp-group/${{github.event.repository.name}}:latest
+                docker push ghcr.io/thevivex/${{github.event.repository.name}}:latest
     Deploy:
         needs: Build
         environment: Produkcja
@@ -60,7 +60,7 @@ jobs:
                 cat > docker-compose.yaml << 'KONFIGURACJA'
                 services:
                   ${{github.event.repository.name}}_prod:
-                      image: ghcr.io/hcmp-group/${{github.event.repository.name}}:latest
+                      image: ghcr.io/thevivex/${{github.event.repository.name}}:latest
                       ports:
                       - "127.0.0.1:${{env.PUBLIC_PORT}}:${{env.APP_PORT}}"
                       networks:
